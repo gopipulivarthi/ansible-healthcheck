@@ -1,0 +1,6 @@
+ansible_connection: ssh
+ansible_user: vagrant
+ansible_password: "{{ vault_linux_password }}"
+ansible_become: true
+ansible_become_method: sudo
+ansible_ssh_common_args: "-o PreferredAuthentications=password -o PubkeyAuthentication=no"

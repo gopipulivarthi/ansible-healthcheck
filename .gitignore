@@ -1,0 +1,13 @@
+.vagrant/
+.terraform/
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/crash.log
+.vault-pass
+*.retry
+__pycache__/
+*.py[cod]
+# Keep encrypted group_vars/all/vault.yml in Git; never commit plaintext secrets.
+# Local report output is not source code. Jenkins archives and publishes it.
+reports/

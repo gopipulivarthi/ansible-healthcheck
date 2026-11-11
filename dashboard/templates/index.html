@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="60">
+  <title>Infrastructure Health Dashboard</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; }
+    body { margin: 0; background: #f4f6fa; color: #172033; }
+    header { background: #14243a; color: white; padding: 22px 5%; }
+    header h1 { margin: 0 0 6px; font-size: 23px; }
+    header p { margin: 0; color: #c6d2e2; font-size: 13px; }
+    main { max-width: 1200px; margin: 26px auto; padding: 0 20px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 22px; }
+    .card, .panel { background: white; border: 1px solid #e2e7ef; border-radius: 12px; padding: 17px; box-shadow: 0 2px 8px rgba(20,36,58,.04); }
+    .card span { color: #66748a; font-size: 12px; }
+    .card strong { display: block; font-size: 27px; margin-top: 7px; }
+    .panel h2 { font-size: 17px; margin: 0 0 14px; }
+    .meta { color: #66748a; font-size: 12px; margin-bottom: 14px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid #edf0f5; font-size: 13px; }
+    th { color: #66748a; font-weight: 600; background: #fafbfd; }
+    .pill { display: inline-block; border-radius: 20px; padding: 4px 9px; font-size: 11px; font-weight: 700; }
+    .OK { background: #e4f7ec; color: #14743b; }
+    .WARNING { background: #fff3d7; color: #986100; }
+    .CRITICAL { background: #fde7e7; color: #a32323; }
+    .muted { color: #66748a; }
+    .history { display: flex; flex-wrap: wrap; gap: 8px; }
+    .history span { background: #eef2f8; border-radius: 7px; padding: 7px 10px; font-size: 12px; }
+    footer { color: #7b8798; text-align: center; font-size: 11px; padding: 24px; }
+    @media (max-width: 600px) { header { padding: 18px 20px; } main { margin-top: 16px; } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Infrastructure Health Check Dashboard</h1>
+  <p>Windows and Linux server monitoring · Ansible + Jenkins</p>
+</header>
+<main>
+  <section class="cards">
+    <div class="card"><span>Servers checked</span><strong id="hostCount">—</strong></div>
+    <div class="card"><span>Healthy</span><strong id="okCount">—</strong></div>
+    <div class="card"><span>Warning</span><strong id="warningCount">—</strong></div>
+    <div class="card"><span>Critical</span><strong id="criticalCount">—</strong></div>
+  </section>
+  <section class="panel">
+    <h2>Latest server status</h2>
+    <div class="meta">Latest run: <strong id="runId">No reports yet</strong> · Auto-refresh every 60 seconds</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Hostname</th><th>Platform</th><th>Operating system</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Uptime</th><th>Status</th></tr></thead>
+        <tbody id="hosts"><tr><td colspan="8" class="muted">Waiting for the first Jenkins health-check run.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  <section class="panel" style="margin-top:18px">
+    <h2>Recent report history</h2>
+    <div id="history" class="history"><span>No report history yet</span></div>
+  </section>
+</main>
+<footer>Lab dashboard · Keep this service on the VirtualBox host-only network; do not expose it directly to the public internet.</footer>
+<script>
+  const fmt = (value, suffix = '') => value === undefined || value === null || value === '' ? '—' : `${value}${suffix}`;
+  async function refreshDashboard() {
+    const response = await fetch('/api/summary', { cache: 'no-store' });
+    const data = await response.json();
+    document.getElementById('hostCount').textContent = data.host_count;
+    document.getElementById('okCount').textContent = data.ok_count;
+    document.getElementById('warningCount').textContent = data.warning_count;
+    document.getElementById('criticalCount').textContent = data.critical_count;
+    document.getElementById('runId').textContent = data.latest_run || 'No reports yet';
+    const tbody = document.getElementById('hosts');
+    tbody.innerHTML = '';
+    if (!data.hosts.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="muted">No health-check reports found. Run the Jenkins pipeline.</td></tr>';
+    }
+    for (const host of data.hosts) {
+      const cpu = host.cpu_load_pct !== undefined ? fmt(host.cpu_load_pct, '%') : `Load ${fmt(host.cpu_load_1m)}`;
+      const disk = host.disk_used_pct !== undefined ? host.disk_used_pct : (host.disk_c_used_pct !== undefined ? host.disk_c_used_pct : host.disk_root_used_pct);
+      const tr = document.createElement('tr');
+      const values = [host.hostname, host.platform, host.os, cpu, fmt(host.memory_used_pct, '%'), fmt(disk, '%'), host.uptime || '—'];
+      for (const value of values) { const td = document.createElement('td'); td.textContent = value; tr.appendChild(td); }
+      const statusCell = document.createElement('td');
+      const badge = document.createElement('span'); badge.className = `pill ${host.status || 'WARNING'}`; badge.textContent = host.status || 'UNKNOWN';
+      statusCell.appendChild(badge); tr.appendChild(statusCell); tbody.appendChild(tr);
+    }
+    const history = document.getElementById('history'); history.innerHTML = '';
+    if (!data.history.length) history.textContent = 'No report history yet';
+    for (const item of data.history) {
+      const span = document.createElement('span'); span.textContent = `${item.run_id} · ${item.host_count} server(s)`; history.appendChild(span);
+    }
+  }
+  refreshDashboard().catch(error => { document.getElementById('hosts').textContent = `Unable to load reports: ${error}`; });
+</script>
+</body>
+</html>

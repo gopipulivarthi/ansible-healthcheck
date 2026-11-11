@@ -1,0 +1,4 @@
+# Lab-only credentials for the Vagrant boxes. Copy this file to vault.yml,
+# encrypt it with ansible-vault, and commit only the encrypted vault.yml.
+vault_linux_password: "vagrant"
+vault_windows_password: "vagrant"

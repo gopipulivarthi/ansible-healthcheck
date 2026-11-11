@@ -1,0 +1,131 @@
+---
+- name: Linux server health checks
+  hosts: linux
+  gather_facts: true
+  become: true
+  vars:
+    report_run_id: "{{ run_id | default('manual') }}"
+    report_dir: "{{ playbook_dir }}/../reports/{{ report_run_id }}"
+  tasks:
+    - name: Create report directory on the Ansible controller
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Check SSH service
+      ansible.builtin.command: systemctl is-active ssh
+      register: ssh_service
+      changed_when: false
+      failed_when: false
+
+    - name: Calculate Linux metrics
+      ansible.builtin.set_fact:
+        hc_memory_total_mb: "{{ ansible_memory_mb.real.total | int }}"
+        hc_memory_available_mb: "{{ ansible_memory_mb.real.free | int }}"
+        hc_disk_used_pct: "{{ (((root_mount.size_total | int - root_mount.size_available | int) / (root_mount.size_total | int)) * 100) | round(1) }}"
+        hc_memory_used_pct: "{{ ((ansible_memory_mb.real.used | float / ansible_memory_mb.real.total | float) * 100) | round(1) }}"
+      vars:
+        root_mount: "{{ ansible_mounts | selectattr('mount', 'equalto', '/') | list | first }}"
+
+    - name: Build Linux report object
+      ansible.builtin.set_fact:
+        hc_report:
+          hostname: "{{ inventory_hostname }}"
+          platform: "Linux"
+          os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+          status: >-
+            {{ 'CRITICAL' if (hc_disk_used_pct | float >= 90 or hc_memory_used_pct | float >= 90 or ssh_service.rc != 0)
+               else ('WARNING' if (hc_disk_used_pct | float >= 80 or hc_memory_used_pct | float >= 80)
+               else 'OK') }}
+          cpu_load_1m: "{{ ansible_loadavg['1m'] | default('n/a') }}"
+          memory_total_mb: "{{ hc_memory_total_mb }}"
+          memory_available_mb: "{{ hc_memory_available_mb }}"
+          memory_used_pct: "{{ hc_memory_used_pct }}"
+          disk_root_used_pct: "{{ hc_disk_used_pct }}"
+          uptime_seconds: "{{ ansible_uptime_seconds | default(0) }}"
+          uptime: "{{ ansible_uptime_seconds | default(0) | int // 86400 }} days"
+          services:
+            - name: ssh
+              status: "{{ ssh_service.stdout | default('unknown') | trim }}"
+          collected_at: "{{ ansible_date_time.iso8601 }}"
+
+    - name: Save Linux JSON report on controller
+      ansible.builtin.copy:
+        content: "{{ hc_report | to_nice_json }}"
+        dest: "{{ report_dir }}/{{ inventory_hostname }}.json"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+
+- name: Windows server health checks
+  hosts: windows
+  gather_facts: false
+  vars:
+    report_run_id: "{{ run_id | default('manual') }}"
+    report_dir: "{{ playbook_dir }}/../reports/{{ report_run_id }}"
+  tasks:
+    - name: Create report directory on the Ansible controller
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Collect Windows metrics with PowerShell
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        $os = Get-CimInstance Win32_OperatingSystem
+        $cpuValues = Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average
+        $cpu = if ($null -eq $cpuValues.Average) { 0 } else { [double]$cpuValues.Average }
+        $memoryTotal = [double]$os.TotalVisibleMemorySize
+        $memoryFree = [double]$os.FreePhysicalMemory
+        $memoryUsedPct = if ($memoryTotal -gt 0) { (($memoryTotal - $memoryFree) / $memoryTotal) * 100 } else { 0 }
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+        $diskUsedPct = if ($disk.Size -gt 0) { (($disk.Size - $disk.FreeSpace) / $disk.Size) * 100 } else { 0 }
+        $uptime = (Get-Date) - $os.LastBootUpTime
+        $serviceNames = @('WinRM', 'EventLog')
+        $services = @($serviceNames | ForEach-Object {
+          $svc = Get-Service -Name $_ -ErrorAction SilentlyContinue
+          [PSCustomObject]@{ name = $_; status = if ($null -eq $svc) { 'NotFound' } else { $svc.Status.ToString() } }
+        })
+        $status = 'OK'
+        if ($memoryUsedPct -ge 90 -or $diskUsedPct -ge 90 -or $cpu -ge 95 -or @($services | Where-Object { $_.status -ne 'Running' }).Count -gt 0) {
+          $status = 'CRITICAL'
+        } elseif ($memoryUsedPct -ge 80 -or $diskUsedPct -ge 80 -or $cpu -ge 80) {
+          $status = 'WARNING'
+        }
+        [PSCustomObject]@{
+          hostname = $env:COMPUTERNAME
+          platform = 'Windows'
+          os = $os.Caption
+          status = $status
+          cpu_load_pct = [math]::Round($cpu, 1)
+          memory_total_mb = [math]::Round($memoryTotal / 1024, 1)
+          memory_available_mb = [math]::Round($memoryFree / 1024, 1)
+          memory_used_pct = [math]::Round($memoryUsedPct, 1)
+          disk_c_used_pct = [math]::Round($diskUsedPct, 1)
+          uptime_seconds = [math]::Round($uptime.TotalSeconds, 0)
+          uptime = "$([int]$uptime.TotalDays) days $($uptime.Hours) hours"
+          services = $services
+          collected_at = (Get-Date).ToString('o')
+        } | ConvertTo-Json -Compress -Depth 5
+      register: windows_metrics
+      changed_when: false
+
+    - name: Parse Windows JSON report
+      ansible.builtin.set_fact:
+        hc_report: "{{ windows_metrics.stdout | trim | from_json }}"
+
+    - name: Save Windows JSON report on controller
+      ansible.builtin.copy:
+        content: "{{ hc_report | to_nice_json }}"
+        dest: "{{ report_dir }}/{{ inventory_hostname }}.json"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
